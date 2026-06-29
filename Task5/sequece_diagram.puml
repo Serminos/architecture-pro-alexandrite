@@ -1,0 +1,40 @@
+@startuml
+title Кеширование в MES API (чтение + запись)
+
+actor "Оператор" as Operator
+participant "MES API" as MES
+participant "Redis" as Cache
+participant "MES DB" as DB
+
+== Чтение списка заказов (Cache-Aside) ==
+Operator -> MES: GET /orders?operator_id=123&page=1
+MES -> Cache: GET orders:list:123:page1
+alt Cache hit
+    Cache --> MES: Данные из кеша
+    MES --> Operator: Список заказов (< 200 мс)
+else Cache miss
+    Cache --> MES: Нет данных
+    MES -> DB: SELECT * FROM orders WHERE operator_id=123 LIMIT 20 OFFSET 0
+    DB --> MES: Результат (5 заказов)
+    MES -> Cache: SET orders:list:123:page1 TTL=60
+    MES --> Operator: Список заказов
+end
+
+== Изменение статуса заказа (программная инвалидация) ==
+Operator -> MES: PUT /orders/456/status?status=SHIPPED
+MES -> DB: BEGIN TRANSACTION
+MES -> DB: UPDATE orders SET status='SHIPPED' WHERE id=456
+DB --> MES: OK
+MES -> DB: COMMIT                     -- сначала фиксируем транзакцию
+MES -> Cache: DEL order:456           -- потом инвалидируем конкретный заказ
+MES --> Operator: Статус обновлён
+
+== Обновление цены (Write-Through) ==
+Operator -> MES: PUT /catalog/prices?item_id=789&price=1500
+MES -> DB: BEGIN TRANSACTION
+MES -> DB: UPDATE catalog SET price=1500 WHERE id=789
+DB --> MES: OK
+MES -> DB: COMMIT
+MES -> Cache: SET catalog:prices TTL=300   -- обновляем кеш
+MES --> Operator: Цена обновлена
+@enduml
